@@ -19,6 +19,7 @@ fn main() -> Result {
     let candidates = points("data/PointsA.txt")?;
     let queries = points("data/PointsB.txt")?;
     let direct = queries.iter().map(|&query| { candidates.iter().enumerate().filter(move |(_, &candidate)| { sq(candidate-query) < radius } ).map(|(id,_)|id) }); // O(N)
+    let time = std::time::Instant::now();
     // Extents
     let min = candidates.iter().fold(f32::MAX.into(), |m, &p| min(m, p) );
     let max = candidates.iter().fold(f32::MIN.into(), |m, &p| max(m, p) );
@@ -57,6 +58,9 @@ fn main() -> Result {
         }
         neighbours
     });
+    let grid = grid.collect::<Vec<_>>().into_iter();
+    let time = time.elapsed().as_millis(); // 30ms
+    println!("{}KB {}ms", from_utf8(&std::fs::read("/proc/self/statm")?)?.split_whitespace().nth(2).ok()?.parse::<usize>()?*4, time);
     let grid = grid.map(|mut r|{r.sort(); r});
     assert!(direct.eq_by(grid, |a, b| a.eq(b)));
     Ok(())
