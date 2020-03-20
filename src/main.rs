@@ -1,4 +1,5 @@
-use {std::{str::*}, framework::*};
+#![feature(iter_order_by)]
+use {std::{str::*}, framework::{*, Image as Grid}};
 
 pub fn points(path: &str) -> Result<Vec<vec2>> {
     let file = std::fs::read(path)?;
@@ -17,80 +18,46 @@ fn main() -> Result {
     let radius = from_utf8(&std::fs::read("data/Radius.txt")?)?.lines().next().ok()?.parse()?;
     let candidates = points("data/PointsA.txt")?;
     let queries = points("data/PointsB.txt")?;
-    let direct = queries.iter().map(|&query| { candidates.iter().enumerate().filter(move |(_, &candidate)| { sq(candidate-query) < radius } ) }); // Direct // O(AB) // ~1050ms
-    //println!("{:?}", direct);
-    /*// Grid // ~O(B√A) Assuming A uniformly distributed points. // 200ms // inner loop speedup should be 10K => ~10x100 ~ 10x
-    const auto b = solve("data/Solution2.txt", [&]{
-        const auto N = int(sqrt(sqrt(vPointListImageA.size()))); // 10K points => Single level grid of 100 cells × ~100 point/cell => 10x10 grid
-        //assert(N == 10);
-        auto countGrid = Grid<uint>(int2{ .x = N, .y = N }, 0);
-
-        // Get input data value ranges
-        auto min = int2::from(INT_MAX), max = int2::from(INT_MIN);
-        for(const auto& a_: vPointListImageA) {
-            const auto a = int2::from(a_);
-            min = ::min(min, a);
-            max = ::max(max, a);
-        }
-        const auto cell_index = [=](const auto p) { return (p-min) * (countGrid.size-int2::from(1)) / (max-min); };
-        //error(min, max); // 1-300, radius=20, 10x10 x 30x30 grid ~ check ~9 cells
-
-        // Computes maximum number of points in a cell
-        for(const auto& a_: vPointListImageA) {
-            const auto a = int2::from(a_);
-            countGrid[cell_index(a)] += 1;
-        }
-        //error(countGrid); // max~140
-        const auto maxCount = ::max(countGrid.buffer);
-
-        auto grid = GridArray<bpPoint>(int2{ .x = N, .y = N }, maxCount, bpPoint());
-
-        // Bin points in cells
-        std::fill(countGrid.buffer.begin(), countGrid.buffer.end(), 0); // countGrid.buffer.fill(0);
-        for(const auto& a_: vPointListImageA) {
-            const auto a = int2::from(a_);
-            const auto index = cell_index(a);
-            auto& len = countGrid[index];
-            grid(index, len) = a_;
-            len += 1;
-        }
-
-        /*mut*/ map<int, list<int>> solution;
-        for(const auto& b : vPointListImageB) {
-            // Search bounding box on grid
-            const auto min_cell = cell_index(int2::from(b)-int2::from(radius));
-            const auto max_cell = cell_index(int2::from(b)+int2::from(radius));
-            //error(min_cell, max_cell);
-            assert(max_cell.x - min_cell.x <= 3);
-            assert(max_cell.y - min_cell.y <= 3);
-
-            /*mut*/ std::list<int> neighbours; // FIXME: vector
-            for(const auto& y: range(min_cell.y, max_cell.y+1)) {
-                for(const auto& x: range(min_cell.x, max_cell.x+1)) {
-                    const auto& cell = int2{.x=int(x),.y=int(y)}; //uint2
-                    for(const auto& i: range(0, countGrid[cell])) {
-                        const auto& a = grid(cell, i); // Assumes CSE
-                        const auto sqDistance = ::sqDistance(int2::from(a), int2::from(b));
-                        if(sqDistance < sq(radius)) { // sq(radius): Assumes CSE
-                            neighbours.push_back(a.GetId());
-                        }
-                    }
+    let direct = queries.iter().map(|&query| { candidates.iter().enumerate().filter(move |(_, &candidate)| { sq(candidate-query) < radius } ).map(|(id,_)|id) }); // O(N)
+    // Extents
+    let min = candidates.iter().fold(f32::MAX.into(), |m, &p| min(m, p) );
+    let max = candidates.iter().fold(f32::MIN.into(), |m, &p| max(m, p) );
+    // O(√N) with uniformly distributed positions
+    let n = sqrt(sqrt(candidates.len() as f32)) as u32; // 10K points => Single level grid of 100 bins × ~100 point/bin => 10x10 grid
+    assert!(n == 10);
+    let grid_size = size2{ x:n, y: n };
+    let bin_coords = |point| uint2::from( (point-min) / (max-min) * (vec2::from(grid_size)-1.0.into()) );
+    // Accumulate bin point counts
+    let mut counts = Grid::zero(grid_size);
+    for &point in &candidates { counts[bin_coords(point)] += 1; }
+    let starts = Image::from_iter(grid_size, counts.iter().scan(0, |size, &count| { let start = *size; *size += count; Some(start) }));
+    let mut binned_candidates = Vec::new();
+    binned_candidates.resize_with(starts.last().ok()? + counts.last().ok()?, Zero::zero);
+    // Bin points
+    let mut counts = Grid::zero(grid_size); // Zero counts
+    for (point_index, &point) in candidates.iter().enumerate() {
+        let bin_index = counts.index(bin_coords(point));
+        let count = &mut counts[bin_index];
+        binned_candidates[starts[bin_index]+*count] = (point_index, point); // Indirect index is sufficient but inlining point position is probably more efficient for search
+        *count += 1;
+    }
+    let grid = queries.iter().map(|&query| {
+        // Evaluates search bounding box coordinates on grid
+        let min = bin_coords(query-vec2::from(radius));
+        let max = bin_coords(query+vec2::from(radius));
+        assert!(max.x - min.x <= 3 && max.y - min.y <= 3);
+        let mut neighbours = Vec::new(); //(todo opti: reserve a good average capacity for efficient collection)
+        for y in min.y ..= max.y {
+            for x in min.x ..= max.x {
+                let bin_index = counts.index(uint2{x,y});
+                for &(candidate_index, candidate) in &binned_candidates[starts[bin_index]..][..counts[bin_index]] {
+                    if sq(candidate-query) < radius { neighbours.push( candidate_index ); }
                 }
             }
-            neighbours.sort(); // Sort for external validation (diff)
-            solution.insert(pair<int, list<int>>(b.GetId(), neighbours));
         }
-        return solution;
+        neighbours
     });
-
-    for(auto a_: a) { // Internal validation
-        auto b_ = b.at(a_.first/*key*/);
-        a_.second.sort();
-        //cout << a_.second << endl;
-        b_.sort();
-        //cout << b_ << endl;
-        assert(a_.second/*value*/ == b_);
-    }*/
-
+    let grid = grid.map(|mut r|{r.sort(); r});
+    assert!(direct.eq_by(grid, |a, b| a.eq(b)));
     Ok(())
 }
